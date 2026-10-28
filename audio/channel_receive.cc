@@ -8,6 +8,9 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
+// Modifications by Pablo GM.
+// Copyright 2026 Genies Inc.
+
 #include "audio/channel_receive.h"
 
 #include <algorithm>
@@ -78,6 +81,7 @@
 #include "rtc_base/numerics/safe_conversions.h"
 #include "rtc_base/numerics/sequence_number_unwrapper.h"
 #include "rtc_base/race_checker.h"
+#include "rtc_base/rtp_to_ntp_estimator.h"
 #include "rtc_base/strings/string_builder.h"
 #include "rtc_base/synchronization/mutex.h"
 #include "rtc_base/system/no_unique_address.h"
@@ -302,6 +306,9 @@ class ChannelReceive : public ChannelReceiveInterface,
   AudioLevel output_audio_level_;
 
   RemoteNtpTimeEstimator ntp_estimator_ RTC_GUARDED_BY(ts_stats_lock_);
+
+  mutable RtpToNtpEstimator playout_ntp_estimator_
+      RTC_GUARDED_BY(worker_thread_checker_);
 
   // Timestamp of the audio pulled from NetEq.
   std::optional<uint32_t> jitter_buffer_playout_timestamp_;
@@ -1092,6 +1099,28 @@ void ChannelReceive::SetEstimatedPlayoutNtpTimestamp(NtpTime ntp_time,
 std::optional<int64_t> ChannelReceive::GetCurrentEstimatedPlayoutNtpTimestampMs(
     int64_t now_ms) const {
   RTC_DCHECK_RUN_ON(&worker_thread_checker_);
+  // Audio-only streams do not have a video synchronizer to set the cached NTP.
+  // Sender reports map this receiver's RTP timeline to publisher NTP directly.
+  const auto report = rtp_rtcp_->GetSenderReportStats();
+  if (report && playout_timestamp_) {
+    playout_ntp_estimator_.UpdateMeasurements(
+        report->last_remote_ntp_timestamp, report->last_remote_rtp_timestamp);
+    const NtpTime estimate =
+        playout_ntp_estimator_.Estimate(playout_timestamp_->rtp_timestamp);
+    if (estimate.Valid()) {
+      return estimate.ToMs() + now_ms - playout_timestamp_->time.ms();
+    }
+    // One sender report already provides the origin. Use the negotiated RTP
+    // clock until a second report can refine its frequency; no RTT is needed.
+    const int64_t frequency = GetRtpTimestampRateHz();
+    const int64_t ticks = static_cast<int32_t>(
+        playout_timestamp_->rtp_timestamp - report->last_remote_rtp_timestamp);
+    if (report->last_remote_ntp_timestamp.Valid() && frequency > 0 &&
+        ticks >= -60 * frequency && ticks <= 60 * frequency) {
+      return report->last_remote_ntp_timestamp.ToMs() + ticks * 1000 / frequency +
+             now_ms - playout_timestamp_->time.ms();
+    }
+  }
   if (!playout_timestamp_ntp_ || !playout_timestamp_ntp_time_)
     return std::nullopt;
 

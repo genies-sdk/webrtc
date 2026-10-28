@@ -8,6 +8,10 @@ Upstream versions are pulled from https://chromiumdash.appspot.com/branches.
 
 Releases are build in [webrtc-build](https://github.com/webrtc-sdk/webrtc-build) and land in [releases](https://github.com/webrtc-sdk/webrtc-build/releases).
 
+## Genies audio-only receiver timing
+
+The receiver estimates publisher NTP at the current audio playout position from RTCP sender reports. This populates the existing estimated playout timestamp in audio-only sessions, including startup with one sender report and no video synchronizer or RTT feedback.
+
 ## Main changes
 
 ### All

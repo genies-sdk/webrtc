@@ -8,6 +8,9 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
+// Modifications by Pablo GM.
+// Copyright 2026 Genies Inc.
+
 #include "audio/channel_receive.h"
 
 #include <cstddef>
@@ -92,8 +95,8 @@ class ChannelReceiveTest : public Test {
 
   uint32_t RtpNow() {
     // Note - the "random" offset of this timestamp is zero.
-    return time_controller_.GetClock()->TimeInMilliseconds() * 1000 /
-           kSampleRateHz;
+    return time_controller_.GetClock()->TimeInMilliseconds() * kSampleRateHz /
+           1000;
   }
 
   RtpPacketReceived CreateRtpPacket() {
@@ -241,6 +244,40 @@ TEST_F(ChannelReceiveTest, CaptureStartTimeBecomesValid) {
   channel->ReceivedRTCPPacket(rtcp_packet_2.data(), rtcp_packet_2.size());
 
   EXPECT_NE(ProbeCaptureStartNtpTime(*channel), -1);
+}
+
+TEST_F(ChannelReceiveTest, AudioOnlyPlayoutNtpDoesNotRequireVideoOrRtt) {
+  auto channel = CreateTestChannelReceive();
+  const auto now_ms = [&] {
+    return time_controller_.GetClock()->TimeInMilliseconds();
+  };
+  EXPECT_FALSE(channel->GetCurrentEstimatedPlayoutNtpTimestampMs(now_ms()));
+  channel->StartPlayout();
+  // Include device latency in the reported playout position.
+  ON_CALL(*audio_device_module_, PlayoutDelay)
+      .WillByDefault(::testing::DoAll(::testing::SetArgPointee<0>(40), Return(0)));
+  std::optional<int64_t> playout_ntp_ms;
+  for (int frame = 0; frame < 250; ++frame) {
+    channel->OnRtpPacket(CreateRtpPacket());
+    if (frame == 0 || frame == 100) {
+      const auto report = CreateRtcpSenderReport();
+      channel->ReceivedRTCPPacket(report.data(), report.size());
+    }
+    AudioFrame output;
+    channel->GetAudioFrameWithInfo(kSampleRateHz, &output);
+    playout_ntp_ms =
+        channel->GetCurrentEstimatedPlayoutNtpTimestampMs(now_ms());
+    if (frame >= 5 && frame < 100) {
+      EXPECT_TRUE(playout_ntp_ms);
+    }
+    time_controller_.AdvanceTime(TimeDelta::Millis(10));
+  }
+  ASSERT_TRUE(playout_ntp_ms);
+  // No video synchronizer and no RTT feedback were configured. The result
+  // must still follow sender NTP, including the simulated output delay.
+  EXPECT_GT(NtpNow().ToMs() - *playout_ntp_ms, 30);
+  EXPECT_LT(NtpNow().ToMs() - *playout_ntp_ms, 150);
+  channel->StopPlayout();
 }
 
 TEST_F(ChannelReceiveTest, SettingFrameTransformer) {
